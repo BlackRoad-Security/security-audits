@@ -1,72 +1,73 @@
-name: CI
+name: Security CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [ main, develop ]
   pull_request:
-    branches: [main, master]
+    branches: [ main, develop ]
 
 jobs:
-  lint-test:
-    name: Lint & Test
+  security-tests:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov bandit black flake8 mypy
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    
+    - name: Run linting with flake8
+      run: |
+        flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Type checking with mypy
+      run: mypy src/ --ignore-missing-imports --no-error-summary || true
+    
+    - name: Security check with bandit
+      run: bandit -r src/ -f json -o bandit-report.json || true
+    
+    - name: Code formatting check
+      run: black --check src/ || true
+    
+    - name: Run tests with coverage
+      run: |
+        pytest tests/ --cov=src --cov-report=xml --cov-report=html -v
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
 
-      - name: Detect project type
-        id: detect
-        run: |
-          if [ -f "package.json" ]; then echo "type=node" >> $GITHUB_OUTPUT
-          elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then echo "type=python" >> $GITHUB_OUTPUT
-          elif [ -f "go.mod" ]; then echo "type=go" >> $GITHUB_OUTPUT
-          elif [ -f "wrangler.toml" ]; then echo "type=worker" >> $GITHUB_OUTPUT
-          else echo "type=generic" >> $GITHUB_OUTPUT
-          fi
-
-      # Node.js
-      - uses: actions/setup-node@v4
-        if: steps.detect.outputs.type == 'node' || steps.detect.outputs.type == 'worker'
-        with: { node-version: '20', cache: 'npm' }
-      - run: npm ci
-        if: steps.detect.outputs.type == 'node' || steps.detect.outputs.type == 'worker'
-        continue-on-error: true
-      - run: npm run lint --if-present
-        if: steps.detect.outputs.type == 'node' || steps.detect.outputs.type == 'worker'
-        continue-on-error: true
-      - run: npm test --if-present
-        if: steps.detect.outputs.type == 'node' || steps.detect.outputs.type == 'worker'
-        continue-on-error: true
-
-      # Python
-      - uses: actions/setup-python@v5
-        if: steps.detect.outputs.type == 'python'
-        with: { python-version: '3.12' }
-      - run: pip install -r requirements.txt --quiet
-        if: steps.detect.outputs.type == 'python'
-        continue-on-error: true
-      - run: python -m pytest --tb=short -q 2>/dev/null || echo "No tests found"
-        if: steps.detect.outputs.type == 'python'
-        continue-on-error: true
-
-      # Go
-      - uses: actions/setup-go@v5
-        if: steps.detect.outputs.type == 'go'
-        with: { go-version: '1.22' }
-      - run: go build ./... && go test ./...
-        if: steps.detect.outputs.type == 'go'
-        continue-on-error: true
-
-      - name: ✅ CI complete
-        run: echo "CI passed for ${{ github.repository }}"
-
-  typecheck:
-    name: Type Check
+  build:
     runs-on: ubuntu-latest
-    if: contains(github.repository, 'blackroad')
+    needs: security-tests
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - run: npm ci 2>/dev/null || true
-      - run: npx tsc --noEmit 2>/dev/null || echo "No TypeScript config"
-        continue-on-error: true
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Build package
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        python setup.py sdist bdist_wheel || echo "No setup.py found"
+    
+    - name: Verify build artifacts
+      run: |
+        ls -la dist/ || echo "No dist directory"
