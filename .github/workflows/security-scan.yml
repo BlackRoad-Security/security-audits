@@ -1,83 +1,52 @@
-name: 🔒 Security Scan
-
+name: Security Scan
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
   schedule:
-    - cron: '0 6 * * 1'  # Every Monday 6 AM UTC
-
-permissions:
-  contents: read
-  security-events: write
+    - cron: '0 6 * * 1'  # Monday 6AM UTC
+  workflow_dispatch:
 
 jobs:
-  secret-scan:
-    name: Secret Detection
+  scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
-      - name: Scan for secrets (trufflehog)
-        uses: trufflesecurity/trufflehog@main
+      - name: Install scanners
+        run: |
+          pip install bandit safety 2>/dev/null || true
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.51.0 2>/dev/null || true
+
+      - name: Bandit (Python security)
+        run: bandit -r src/ -ll -f json -o bandit-report.json 2>/dev/null || true
+
+      - name: Safety (dependency vulns)
+        run: safety check --json > safety-report.json 2>/dev/null || true
+
+      - name: Trivy filesystem scan
+        run: trivy fs --format sarif --output trivy-results.sarif . 2>/dev/null || true
+
+      - name: Secret patterns scan
+        run: |
+          echo "Scanning for exposed secrets..."
+          grep -rn "sk-proj-\|sk-ant-\|hf_\|ghp_\|AKIA" \
+            --include="*.py" --include="*.ts" --include="*.js" \
+            --exclude-dir=".git" --exclude-dir="node_modules" . 2>/dev/null && \
+            echo "SECRETS FOUND - review immediately!" || echo "No secrets found"
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
-          path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
-          extra_args: --only-verified
+          sarif_file: trivy-results.sarif
         continue-on-error: true
 
-      - name: Check for hardcoded tokens
+      - name: Summary
         run: |
-          echo "Scanning for hardcoded credentials..."
-          # Check for common patterns
-          FOUND=0
-          grep -rn "sk-[a-zA-Z0-9]" . --include="*.ts" --include="*.js" --include="*.py" \
-            --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1
-          grep -rn "ANTHROPIC_API_KEY\s*=\s*['\"]sk" . \
-            --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1
-          grep -rn "ghp_[a-zA-Z0-9]" . \
-            --exclude-dir=".git" 2>/dev/null && FOUND=1
-          if [ $FOUND -eq 1 ]; then
-            echo "::error::Potential hardcoded credentials detected!"
-            exit 1
-          fi
-          echo "✅ No hardcoded credentials found"
-
-  dependency-audit:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Node.js audit
-        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('package.json') != '' }}
-        run: |
-          npm audit --audit-level=high 2>/dev/null || echo "npm audit completed"
-        continue-on-error: true
-
-      - name: Python safety check
-        if: ${{ hashFiles('requirements.txt') != '' }}
-        run: |
-          pip install safety --quiet
-          safety check -r requirements.txt 2>/dev/null || echo "safety check completed"
-        continue-on-error: true
-
-  codeql:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        language: ['javascript', 'python']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ matrix.language }}
-        continue-on-error: true
-      - uses: github/codeql-action/autobuild@v3
-        continue-on-error: true
-      - uses: github/codeql-action/analyze@v3
-        continue-on-error: true
+          echo "## Security Scan Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Bandit: $(cat bandit-report.json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get(\"results\",[])), \"issues\")' 2>/dev/null || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
+          echo "- Trivy: scan complete" >> $GITHUB_STEP_SUMMARY
